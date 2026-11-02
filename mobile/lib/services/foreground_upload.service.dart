@@ -98,8 +98,16 @@ class ForegroundUploadService {
     final hasWifi = networkCapabilities.isUnmetered;
     _logger.info('Network capabilities: $networkCapabilities, hasWifi/isUnmetered: $hasWifi');
 
+    final maxFileSizeBytes = SettingsRepository.instance.appConfig.backup.maxFileSizeBytes;
+
     if (useSequentialUpload) {
-      await _uploadSequentially(items: candidates, cancelToken: cancelToken, hasWifi: hasWifi, callbacks: callbacks);
+      await _uploadSequentially(
+        items: candidates,
+        cancelToken: cancelToken,
+        hasWifi: hasWifi,
+        callbacks: callbacks,
+        maxFileSizeBytes: maxFileSizeBytes,
+      );
     } else {
       await _executeWithWorkerPool<LocalAsset>(
         items: candidates,
@@ -108,7 +116,8 @@ class ForegroundUploadService {
           final requireWifi = _shouldRequireWiFi(asset);
           return requireWifi && !hasWifi;
         },
-        processItem: (asset) => uploadSingleAsset(asset, cancelToken, callbacks: callbacks),
+        processItem: (asset) =>
+            uploadSingleAsset(asset, cancelToken, callbacks: callbacks, maxFileSizeBytes: maxFileSizeBytes),
       );
     }
   }
@@ -119,6 +128,7 @@ class ForegroundUploadService {
     required Completer<void> cancelToken,
     required bool hasWifi,
     required UploadCallbacks callbacks,
+    int? maxFileSizeBytes,
   }) async {
     await _storageRepository.clearCache();
     shouldAbortUpload = false;
@@ -134,7 +144,7 @@ class ForegroundUploadService {
         continue;
       }
 
-      await uploadSingleAsset(asset, cancelToken, callbacks: callbacks);
+      await uploadSingleAsset(asset, cancelToken, callbacks: callbacks, maxFileSizeBytes: maxFileSizeBytes);
     }
   }
 
@@ -247,6 +257,7 @@ class ForegroundUploadService {
     LocalAsset asset,
     Completer<void>? cancelToken, {
     required UploadCallbacks callbacks,
+    int? maxFileSizeBytes,
   }) async {
     final t = StaticTranslations.instance;
     final assetNotFoundOnDevice = CurrentPlatform.isAndroid
@@ -315,6 +326,11 @@ class ForegroundUploadService {
       if (file == null) {
         _logger.warning("Failed to obtain file from iCloud for asset ${asset.id} - ${asset.name}");
         callbacks.onError?.call(asset.localId!, t.asset_not_found_on_icloud);
+        return;
+      }
+
+      if (maxFileSizeBytes != null && await _exceedsMaxFileSize([file, ?livePhotoFile], maxFileSizeBytes)) {
+        _logger.info("Skipping ${asset.id} - ${asset.name} because it exceeds the max backup file size");
         return;
       }
 
@@ -464,6 +480,15 @@ class ForegroundUploadService {
     } catch (e) {
       return UploadResult.error(errorMessage: e.toString());
     }
+  }
+
+  Future<bool> _exceedsMaxFileSize(List<File> files, int maxFileSizeBytes) async {
+    for (final file in files) {
+      if (await file.length() > maxFileSizeBytes) {
+        return true;
+      }
+    }
+    return false;
   }
 
   bool _shouldRequireWiFi(LocalAsset asset) {

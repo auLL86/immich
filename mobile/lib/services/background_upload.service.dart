@@ -161,11 +161,14 @@ class BackgroundUploadService {
     _logger.info("Found ${candidates.length} backup candidates for background tasks");
 
     const batchSize = 100;
-    final batch = candidates.take(batchSize).toList();
+    final maxFileSizeBytes = SettingsRepository.instance.appConfig.backup.maxFileSizeBytes;
     final List<UploadTask> tasks = [];
 
-    for (final asset in batch) {
-      final task = await getUploadTask(asset);
+    for (final asset in candidates) {
+      if (tasks.length >= batchSize || shouldAbortQueuingTasks) {
+        break;
+      }
+      final task = await getUploadTask(asset, maxFileSizeBytes: maxFileSizeBytes);
       if (task != null) {
         tasks.add(task);
       }
@@ -274,7 +277,12 @@ class BackgroundUploadService {
   }
 
   @visibleForTesting
-  Future<UploadTask?> getUploadTask(LocalAsset asset, {String group = kBackupGroup, int? priority}) async {
+  Future<UploadTask?> getUploadTask(
+    LocalAsset asset, {
+    String group = kBackupGroup,
+    int? priority,
+    int? maxFileSizeBytes,
+  }) async {
     final entity = await _storageRepository.getAssetEntityForAsset(asset);
     if (entity == null) {
       _logger.warning("Asset entity not found for ${asset.id} - ${asset.name}");
@@ -298,6 +306,11 @@ class BackgroundUploadService {
 
     if (file == null) {
       _logger.warning("Failed to get file for asset ${asset.id} - ${asset.name}");
+      return null;
+    }
+
+    if (maxFileSizeBytes != null && await file.length() > maxFileSizeBytes) {
+      _logger.info("Skipping ${asset.id} - ${asset.name} because it exceeds the max backup file size");
       return null;
     }
 

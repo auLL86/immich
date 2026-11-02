@@ -43,6 +43,7 @@ enum SettingsKey<T> {
   backupRequireCharging<bool>(),
   backupTriggerDelay<int>(),
   backupSyncAlbums<bool>(),
+  backupMaxFileSizeMb<int>(),
 
   // Timeline
   timelineTilesPerRow<int>(),
