@@ -13,8 +13,18 @@ import 'package:pigeon/pigeon.dart';
 )
 enum NetworkCapability { cellular, wifi, vpn, unmetered }
 
+class BatteryStatus {
+  /// 0-100, or -1 when unknown.
+  final int level;
+  final bool isCharging;
+
+  const BatteryStatus({required this.level, required this.isCharging});
+}
+
 @HostApi()
 abstract class ConnectivityApi {
   @TaskQueue(type: TaskQueueType.serialBackgroundThread)
   List<NetworkCapability> getCapabilities();
+
+  BatteryStatus getBatteryStatus();
 }

@@ -6,8 +6,10 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/constants/constants.dart';
 import 'package:immich_mobile/domain/models/album/local_album.model.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
+import 'package:immich_mobile/domain/services/backup_filter.service.dart';
 import 'package:immich_mobile/extensions/platform_extensions.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/settings.provider.dart';
 import 'package:immich_mobile/providers/user.provider.dart';
 import 'package:immich_mobile/services/background_upload.service.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
@@ -298,4 +300,24 @@ final candidateBackupAlbumInfoProvider = FutureProvider.autoDispose.family<List<
       .read(driftProvider)
       .localAssetRepository
       .getSourceAlbums(assetId, backupSelection: BackupSelection.selected);
+});
+
+/// Number of backup candidates excluded by the shared backup filters, per reason (metadata
+/// filters only; size and LAN decisions are made at upload time and added from the last run).
+final backupFilterSkippedProvider = FutureProvider.autoDispose<Map<BackupSkipReason, int>>((ref) async {
+  final user = ref.watch(currentUserProvider);
+  ref.watch(backupProvider.select((p) => p.remainderCount));
+  ref.watch(appConfigProvider.select((c) => c.backup.filterProfile));
+  if (user == null) {
+    return const {};
+  }
+  final service = ref.read(foregroundUploadServiceProvider);
+  final result = await service.getFilteredBackupCandidates(user.id, onlyHashed: false);
+  final counts = {...result.filter.skipped};
+  for (final e in service.lastSkipped.entries) {
+    if (e.key == BackupSkipReason.tooLarge || e.key == BackupSkipReason.largeFileNeedsLan) {
+      counts[e.key] = e.value;
+    }
+  }
+  return counts;
 });

@@ -11,18 +11,22 @@ import 'package:immich_mobile/domain/models/asset/asset_metadata.model.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/domain/services/asset.service.dart';
+import 'package:immich_mobile/domain/services/backup_filter.service.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/extensions/platform_extensions.dart';
 import 'package:immich_mobile/infrastructure/repositories/backup.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/local_asset.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
+import 'package:immich_mobile/platform/connectivity_api.g.dart';
 import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/storage.provider.dart';
 import 'package:immich_mobile/repositories/asset_media.repository.dart';
 import 'package:immich_mobile/repositories/upload.repository.dart';
 import 'package:immich_mobile/services/api.service.dart';
+import 'package:immich_mobile/services/backup_candidate_filter.dart';
+import 'package:immich_mobile/services/backup_filter_sync.service.dart';
 import 'package:immich_mobile/utils/debug_print.dart';
 import 'package:logging/logging.dart';
 import 'package:openapi/api.dart' as api;
@@ -86,6 +90,9 @@ abstract class UploadTaskMetadata with _$UploadTaskMetadata {
 /// This service handles asynchronous background uploads that can continue
 /// even when the app is suspended. Primarily used for iOS background backup.
 class BackgroundUploadService {
+  /// Overridable for tests; defaults to the platform implementation.
+  ConnectivityApi? connectivityApi;
+
   BackgroundUploadService(
     this._uploadRepository,
     this._storageRepository,
@@ -152,20 +159,33 @@ class BackgroundUploadService {
     await _storageRepository.clearCache();
     shouldAbortQueuingTasks = false;
 
-    final candidates = await _backupRepository.getCandidates(userId);
+    await BackupFilterSyncService.sync(timeout: const Duration(seconds: 5));
+    final loaded = await BackupCandidateFilter.load(_backupRepository, userId);
+    final filter = loaded.filter;
+    final candidates = loaded.candidates;
+    if (filter.skippedTotal > 0) {
+      _logger.info("Backup filters skipped ${filter.skippedTotal} assets: ${filter.skipped}");
+    }
     if (candidates.isEmpty) {
       _logger.info("No new backup candidates found, finishing background upload");
+      return;
+    }
+
+    if (!await BackupCandidateFilter.powerAllows(connectivityApi ?? ConnectivityApi(), filter.profile)) {
+      _logger.info("Charging/battery condition not met, not queuing background uploads");
       return;
     }
 
     _logger.info("Found ${candidates.length} backup candidates for background tasks");
 
     const batchSize = 100;
-    final batch = candidates.take(batchSize).toList();
     final List<UploadTask> tasks = [];
 
-    for (final asset in batch) {
-      final task = await getUploadTask(asset);
+    for (final asset in candidates) {
+      if (tasks.length >= batchSize || shouldAbortQueuingTasks) {
+        break;
+      }
+      final task = await getUploadTask(asset, filter: filter);
       if (task != null) {
         tasks.add(task);
       }
@@ -274,12 +294,31 @@ class BackgroundUploadService {
   }
 
   @visibleForTesting
-  Future<UploadTask?> getUploadTask(LocalAsset asset, {String group = kBackupGroup, int? priority}) async {
+  Future<UploadTask?> getUploadTask(
+    LocalAsset asset, {
+    String group = kBackupGroup,
+    int? priority,
+    BackupCandidateFilter? filter,
+  }) async {
     final entity = await _storageRepository.getAssetEntityForAsset(asset);
     if (entity == null) {
       _logger.warning("Asset entity not found for ${asset.id} - ${asset.name}");
       return null;
     }
+
+    if (filter != null &&
+        filter.checkEntity(
+              asset,
+              iosSubtype: CurrentPlatform.isIOS ? entity.subtype : null,
+              relativePath: CurrentPlatform.isAndroid ? entity.relativePath : null,
+            ) !=
+            null) {
+      _logger.info("Skipping ${asset.id} - ${asset.name}: excluded by backup filters");
+      return null;
+    }
+
+    // Live Photo "still only" uploads the photo as a regular image.
+    final isLivePhoto = entity.isLivePhoto && (filter?.uploadLivePhotoMotion ?? true);
 
     File? file;
 
@@ -290,7 +329,7 @@ class BackgroundUploadService {
     /// We implement two separate upload groups for this, the normal one for the video file
     /// and the higher priority group for the photo file because the video file is already uploaded.
 
-    if (entity.isLivePhoto) {
+    if (isLivePhoto) {
       file = await _storageRepository.getMotionFileForAsset(asset);
     } else {
       file = await _storageRepository.getFileForAsset(asset.id);
@@ -301,6 +340,19 @@ class BackgroundUploadService {
       return null;
     }
 
+    if (filter != null) {
+      switch (filter.checkSize(asset, await file.length())) {
+        case BackupSizeDecision.upload:
+          break;
+        case BackupSizeDecision.skipTooLarge:
+          _logger.info("Skipping ${asset.id} - ${asset.name} because it exceeds the max backup file size");
+          return null;
+        case BackupSizeDecision.deferUntilLan:
+          _logger.info("Deferring ${asset.id} - ${asset.name}: large file waits for a LAN/Tailscale connection");
+          return null;
+      }
+    }
+
     final fileName = await _assetMediaRepository.getOriginalFilename(asset.id) ?? asset.name;
     // Some apps (e.g. DJI/Fusion) return names without an extension; fall back to the asset name for those.
     final extension = p.extension(file.path).isNotEmpty ? p.extension(file.path) : p.extension(asset.name);
@@ -308,7 +360,7 @@ class BackgroundUploadService {
 
     final String metadata = UploadTaskMetadata(
       localAssetId: asset.id,
-      isLivePhotos: entity.isLivePhoto,
+      isLivePhotos: isLivePhoto,
       livePhotoVideoId: '',
       checksum: asset.checksum,
     ).toJson();
@@ -327,11 +379,11 @@ class BackgroundUploadService {
       isFavorite: asset.isFavorite,
       requiresWiFi: requiresWiFi,
       // Visibility hidden on upload to prevent the server from running regular jobs on the live photo asset
-      fields: entity.isLivePhoto ? {'visibility': api.AssetVisibility.hidden.toString()} : null,
-      cloudId: entity.isLivePhoto ? null : asset.cloudId,
-      adjustmentTime: entity.isLivePhoto ? null : asset.adjustmentTime?.toIso8601String(),
-      latitude: entity.isLivePhoto ? null : asset.latitude?.toString(),
-      longitude: entity.isLivePhoto ? null : asset.longitude?.toString(),
+      fields: isLivePhoto ? {'visibility': api.AssetVisibility.hidden.toString()} : null,
+      cloudId: isLivePhoto ? null : asset.cloudId,
+      adjustmentTime: isLivePhoto ? null : asset.adjustmentTime?.toIso8601String(),
+      latitude: isLivePhoto ? null : asset.latitude?.toString(),
+      longitude: isLivePhoto ? null : asset.longitude?.toString(),
     );
   }
 

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/album/local_album.model.dart';
 import 'package:immich_mobile/domain/models/config/app_config.dart';
@@ -14,6 +15,8 @@ import 'package:immich_mobile/providers/backup/backup_album.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/settings.provider.dart';
 import 'package:immich_mobile/providers/user.provider.dart';
+import 'package:immich_mobile/services/backup_filter_sync.service.dart';
+import 'package:immich_mobile/widgets/settings/backup_settings/backup_filter_settings.dart';
 import 'package:immich_ui/immich_ui.dart';
 
 class BackupSettings extends StatelessWidget {
@@ -26,6 +29,11 @@ class BackupSettings extends StatelessWidget {
         SettingGroupTitle(title: context.t.network_requirements, icon: Icons.cell_tower),
         const _UseCellularForVideosButton(),
         const _UseCellularForPhotosButton(),
+        const Divider(),
+        SettingGroupTitle(title: context.t.backup_max_file_size_group, icon: Icons.sd_card_alert_outlined),
+        const _MaxFileSizeTile(),
+        const Divider(),
+        const BackupFilterSettings(),
         if (CurrentPlatform.isAndroid) ...[
           const Divider(),
           SettingGroupTitle(title: context.t.background_options, icon: Icons.charging_station_rounded),
@@ -205,6 +213,67 @@ class _UseCellularForPhotosButton extends StatelessWidget {
       selector: (c) => c.backup.useCellularForPhotos,
       title: context.t.photos,
       subtitle: context.t.network_requirement_photos_upload,
+    );
+  }
+}
+
+class _MaxFileSizeTile extends ConsumerWidget {
+  const _MaxFileSizeTile();
+
+  Future<int?> _showEditDialog(BuildContext context, int currentValue) async {
+    final controller = TextEditingController(text: currentValue.toString());
+    final result = await showDialog<int>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(context.t.backup_max_file_size_title),
+        content: ImmichTextInput(
+          controller: controller,
+          autofocus: true,
+          keyboardType: .number,
+          keyboardAction: .done,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          hintText: context.t.backup_max_file_size_hint,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(context.t.cancel.toUpperCase(), style: const TextStyle(color: Colors.red)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, int.tryParse(controller.text) ?? 0),
+            child: Text(context.t.save.toUpperCase()),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    return result;
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // the limit is part of the shared filter profile (kept in sync with backupMaxFileSizeMb)
+    ref.watch(appConfigProvider.select((c) => (c.backup.maxFileSizeMb, c.backup.filterProfile)));
+    final maxFileSizeMb = BackupFilterSyncService.document.profile.maxFileSizeMb;
+
+    Future<void> handleTap() async {
+      final newValue = await _showEditDialog(context, maxFileSizeMb);
+      if (newValue != null) {
+        await BackupFilterSyncService.updateProfile({'maxFileSizeMb': newValue});
+      }
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(left: 8.0),
+      child: SettingListTile(
+        title: context.t.backup_max_file_size_title,
+        subtitle: context.t.backup_max_file_size_subtitle,
+        onTap: handleTap,
+        trailing: Text(
+          maxFileSizeMb > 0 ? context.t.backup_max_file_size_value(size: maxFileSizeMb) : context.t.unlimited,
+          style: context.textTheme.labelLarge,
+        ),
+      ),
     );
   }
 }
