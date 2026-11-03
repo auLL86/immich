@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/album/local_album.model.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
+import 'package:immich_mobile/domain/services/backup_filter.service.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/extensions/platform_extensions.dart';
@@ -136,6 +137,7 @@ class _BackupPageState extends ConsumerState<BackupPage> {
                   const _TotalCard(),
                   const _BackupCard(),
                   const _RemainderCard(),
+                  const _FilterSkippedCard(),
                   const Divider(),
                   BackupToggleButton(
                     onStart: () async => await startBackup(),
@@ -442,6 +444,40 @@ class _BackupCard extends ConsumerWidget {
       subtitle: context.t.backup_controller_page_backup_sub,
       info: backupCount.toString(),
       isLoading: syncStatus.isRemoteSyncing,
+    );
+  }
+}
+
+class _FilterSkippedCard extends ConsumerWidget {
+  const _FilterSkippedCard();
+
+  static String _label(BuildContext context, BackupSkipReason r) => switch (r) {
+    BackupSkipReason.mediaType => context.t.backup_filter_reason_media_type,
+    BackupSkipReason.dateRange => context.t.backup_filter_reason_date_range,
+    BackupSkipReason.notInSelectedAlbums => context.t.backup_filter_reason_not_in_albums,
+    BackupSkipReason.notFavorite => context.t.backup_filter_reason_not_favorite,
+    BackupSkipReason.screenshot => context.t.backup_filter_reason_screenshot,
+    BackupSkipReason.messagingApp => context.t.backup_filter_reason_messaging,
+    BackupSkipReason.tooLarge => context.t.backup_filter_reason_too_large,
+    BackupSkipReason.recentVideo => context.t.backup_filter_reason_recent_video,
+    BackupSkipReason.largeFileNeedsLan => context.t.backup_filter_reason_needs_lan,
+  };
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final skipped = ref.watch(backupFilterSkippedProvider).value ?? const {};
+    final total = skipped.values.fold(0, (a, b) => a + b);
+    if (total == 0) {
+      return const SizedBox.shrink();
+    }
+    final details = [
+      for (final e in skipped.entries)
+        if (e.value > 0) '${_label(context, e.key)}: ${e.value}',
+    ].join(' · ');
+    return BackupInfoCard(
+      title: context.t.backup_filter_skipped_title,
+      subtitle: '${context.t.backup_filter_skipped_sub}\n$details',
+      info: total.toString(),
     );
   }
 }

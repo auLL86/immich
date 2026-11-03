@@ -1,4 +1,5 @@
 import Network
+import UIKit
 
 class ConnectivityApiImpl: ConnectivityApi {
   private let monitor = NWPathMonitor()
@@ -57,5 +58,15 @@ class ConnectivityApiImpl: ConnectivityApi {
     }
     
     return capabilities
+  }
+
+  func getBatteryStatus() throws -> BatteryStatus {
+    let device = UIDevice.current
+    let wasEnabled = device.isBatteryMonitoringEnabled
+    device.isBatteryMonitoringEnabled = true
+    defer { if !wasEnabled { device.isBatteryMonitoringEnabled = false } }
+    let level = device.batteryLevel < 0 ? -1 : Int64((device.batteryLevel * 100).rounded())
+    let charging = device.batteryState == .charging || device.batteryState == .full
+    return BatteryStatus(level: level, isCharging: charging)
   }
 }

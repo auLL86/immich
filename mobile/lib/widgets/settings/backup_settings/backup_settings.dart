@@ -15,6 +15,8 @@ import 'package:immich_mobile/providers/backup/backup_album.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/settings.provider.dart';
 import 'package:immich_mobile/providers/user.provider.dart';
+import 'package:immich_mobile/services/backup_filter_sync.service.dart';
+import 'package:immich_mobile/widgets/settings/backup_settings/backup_filter_settings.dart';
 import 'package:immich_ui/immich_ui.dart';
 
 class BackupSettings extends StatelessWidget {
@@ -30,6 +32,8 @@ class BackupSettings extends StatelessWidget {
         const Divider(),
         SettingGroupTitle(title: context.t.backup_max_file_size_group, icon: Icons.sd_card_alert_outlined),
         const _MaxFileSizeTile(),
+        const Divider(),
+        const BackupFilterSettings(),
         if (CurrentPlatform.isAndroid) ...[
           const Divider(),
           SettingGroupTitle(title: context.t.background_options, icon: Icons.charging_station_rounded),
@@ -248,12 +252,14 @@ class _MaxFileSizeTile extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final maxFileSizeMb = ref.watch(appConfigProvider.select((c) => c.backup.maxFileSizeMb));
+    // the limit is part of the shared filter profile (kept in sync with backupMaxFileSizeMb)
+    ref.watch(appConfigProvider.select((c) => (c.backup.maxFileSizeMb, c.backup.filterProfile)));
+    final maxFileSizeMb = BackupFilterSyncService.document.profile.maxFileSizeMb;
 
     Future<void> handleTap() async {
       final newValue = await _showEditDialog(context, maxFileSizeMb);
       if (newValue != null) {
-        await ref.read(settingsProvider).write(SettingsKey.backupMaxFileSizeMb, newValue);
+        await BackupFilterSyncService.updateProfile({'maxFileSizeMb': newValue});
       }
     }
 

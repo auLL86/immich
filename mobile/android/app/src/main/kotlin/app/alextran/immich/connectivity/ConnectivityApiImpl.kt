@@ -1,11 +1,15 @@
 package app.alextran.immich.connectivity
 
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 
 class ConnectivityApiImpl(context: Context) : ConnectivityApi {
+  private val appContext = context.applicationContext
   private val connectivityManager =
     context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
   private val wifiManager =
@@ -35,5 +39,18 @@ class ConnectivityApiImpl(context: Context) : ConnectivityApi {
       }
       if (isUnmetered) add(NetworkCapability.UNMETERED)
     }
+  }
+
+  override fun getBatteryStatus(): BatteryStatus {
+    val intent: Intent? = appContext.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+    val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+    val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+    val percent = if (level >= 0 && scale > 0) (level * 100) / scale else -1
+    val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+    val plugged = intent?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
+    val charging = plugged != 0 ||
+      status == BatteryManager.BATTERY_STATUS_CHARGING ||
+      status == BatteryManager.BATTERY_STATUS_FULL
+    return BatteryStatus(percent.toLong(), charging)
   }
 }

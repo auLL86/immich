@@ -241,4 +241,42 @@ void main() {
       expect(result.first.id, asset.id);
     });
   });
+
+  group('always-backup albums', () {
+    late String userId;
+
+    setUp(() async {
+      userId = (await ctx.newUser()).id;
+    });
+
+    test('includes assets of an always-backup album even when it is not selected', () async {
+      final selected = await ctx.newLocalAlbum(name: 'Camera', backupSelection: BackupSelection.selected);
+      final family = await ctx.newLocalAlbum(name: 'Keluarga', backupSelection: BackupSelection.none);
+      final other = await ctx.newLocalAlbum(name: 'Other', backupSelection: BackupSelection.none);
+      final a = await ctx.newLocalAsset();
+      final b = await ctx.newLocalAsset();
+      final c = await ctx.newLocalAsset();
+      await ctx.newLocalAlbumAsset(albumId: selected.id, assetId: a.id);
+      await ctx.newLocalAlbumAsset(albumId: family.id, assetId: b.id);
+      await ctx.newLocalAlbumAsset(albumId: other.id, assetId: c.id);
+
+      final plain = await sut.getCandidates(userId);
+      expect(plain.map((e) => e.id).toSet(), {a.id});
+
+      final withAlways = await sut.getCandidates(userId, alwaysBackupAlbumNames: [' keluarga ']);
+      expect(withAlways.map((e) => e.id).toSet(), {a.id, b.id});
+    });
+
+    test('getAlbumNamesForAssets and getLocalAlbumNames', () async {
+      final album1 = await ctx.newLocalAlbum(name: 'Camera', backupSelection: BackupSelection.selected);
+      final album2 = await ctx.newLocalAlbum(name: 'WhatsApp Images', backupSelection: BackupSelection.none);
+      final asset = await ctx.newLocalAsset();
+      await ctx.newLocalAlbumAsset(albumId: album1.id, assetId: asset.id);
+      await ctx.newLocalAlbumAsset(albumId: album2.id, assetId: asset.id);
+
+      final names = await sut.getAlbumNamesForAssets([asset.id]);
+      expect(names[asset.id], {'Camera', 'WhatsApp Images'});
+      expect((await sut.getLocalAlbumNames()).toSet(), containsAll(['Camera', 'WhatsApp Images']));
+    });
+  });
 }

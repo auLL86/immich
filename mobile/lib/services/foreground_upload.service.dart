@@ -8,6 +8,7 @@ import 'package:immich_mobile/domain/models/asset/asset_metadata.model.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart' hide AssetVisibility;
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/domain/services/asset.service.dart';
+import 'package:immich_mobile/domain/services/backup_filter.service.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/extensions/network_capability_extensions.dart';
 import 'package:immich_mobile/extensions/platform_extensions.dart';
@@ -22,6 +23,8 @@ import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/storage.provider.dart';
 import 'package:immich_mobile/repositories/asset_media.repository.dart';
 import 'package:immich_mobile/repositories/upload.repository.dart';
+import 'package:immich_mobile/services/backup_candidate_filter.dart';
+import 'package:immich_mobile/services/backup_filter_sync.service.dart';
 import 'package:logging/logging.dart';
 import 'package:openapi/api.dart';
 import 'package:path/path.dart' as p;
@@ -78,9 +81,20 @@ class ForegroundUploadService {
     return _backupRepository.getAllCounts(userId);
   }
 
-  Future<List<LocalAsset>> getBackupCandidates(String userId, {bool onlyHashed = true}) {
-    return _backupRepository.getCandidates(userId, onlyHashed: onlyHashed);
+  /// Candidates after the shared backup filters (album/type/date/favorites/screenshots/...).
+  Future<List<LocalAsset>> getBackupCandidates(String userId, {bool onlyHashed = true}) async {
+    return (await getFilteredBackupCandidates(userId, onlyHashed: onlyHashed)).candidates;
   }
+
+  Future<({List<LocalAsset> candidates, BackupCandidateFilter filter})> getFilteredBackupCandidates(
+    String userId, {
+    bool onlyHashed = true,
+  }) {
+    return BackupCandidateFilter.load(_backupRepository, userId, onlyHashed: onlyHashed);
+  }
+
+  /// Skip counters of the last automatic run (shown on the backup page).
+  Map<BackupSkipReason, int> lastSkipped = const {};
 
   /// Bulk upload of backup candidates from selected albums
   Future<void> uploadCandidates(
@@ -89,8 +103,17 @@ class ForegroundUploadService {
     UploadCallbacks callbacks = const UploadCallbacks(),
     bool useSequentialUpload = false,
   }) async {
-    final candidates = await _backupRepository.getCandidates(userId);
+    await BackupFilterSyncService.sync(timeout: const Duration(seconds: 5));
+    final loaded = await getFilteredBackupCandidates(userId);
+    final filter = loaded.filter;
+    final candidates = loaded.candidates;
+    lastSkipped = filter.skipped;
     if (candidates.isEmpty) {
+      return;
+    }
+
+    if (!await BackupCandidateFilter.powerAllows(_connectivityApi, filter.profile)) {
+      _logger.info('Skipping automatic backup: charging/battery condition not met');
       return;
     }
 
@@ -98,15 +121,13 @@ class ForegroundUploadService {
     final hasWifi = networkCapabilities.isUnmetered;
     _logger.info('Network capabilities: $networkCapabilities, hasWifi/isUnmetered: $hasWifi');
 
-    final maxFileSizeBytes = SettingsRepository.instance.appConfig.backup.maxFileSizeBytes;
-
     if (useSequentialUpload) {
       await _uploadSequentially(
         items: candidates,
         cancelToken: cancelToken,
         hasWifi: hasWifi,
         callbacks: callbacks,
-        maxFileSizeBytes: maxFileSizeBytes,
+        filter: filter,
       );
     } else {
       await _executeWithWorkerPool<LocalAsset>(
@@ -116,8 +137,7 @@ class ForegroundUploadService {
           final requireWifi = _shouldRequireWiFi(asset);
           return requireWifi && !hasWifi;
         },
-        processItem: (asset) =>
-            uploadSingleAsset(asset, cancelToken, callbacks: callbacks, maxFileSizeBytes: maxFileSizeBytes),
+        processItem: (asset) => uploadSingleAsset(asset, cancelToken, callbacks: callbacks, filter: filter),
       );
     }
   }
@@ -128,7 +148,7 @@ class ForegroundUploadService {
     required Completer<void> cancelToken,
     required bool hasWifi,
     required UploadCallbacks callbacks,
-    int? maxFileSizeBytes,
+    BackupCandidateFilter? filter,
   }) async {
     await _storageRepository.clearCache();
     shouldAbortUpload = false;
@@ -144,7 +164,7 @@ class ForegroundUploadService {
         continue;
       }
 
-      await uploadSingleAsset(asset, cancelToken, callbacks: callbacks, maxFileSizeBytes: maxFileSizeBytes);
+      await uploadSingleAsset(asset, cancelToken, callbacks: callbacks, filter: filter);
     }
   }
 
@@ -257,7 +277,7 @@ class ForegroundUploadService {
     LocalAsset asset,
     Completer<void>? cancelToken, {
     required UploadCallbacks callbacks,
-    int? maxFileSizeBytes,
+    BackupCandidateFilter? filter,
   }) async {
     final t = StaticTranslations.instance;
     final assetNotFoundOnDevice = CurrentPlatform.isAndroid
@@ -279,6 +299,19 @@ class ForegroundUploadService {
         return;
       }
 
+      if (filter != null &&
+          filter.checkEntity(
+                asset,
+                iosSubtype: CurrentPlatform.isIOS ? entity.subtype : null,
+                relativePath: CurrentPlatform.isAndroid ? entity.relativePath : null,
+              ) !=
+              null) {
+        _logger.info("Skipping ${asset.id} - ${asset.name}: excluded by backup filters");
+        return;
+      }
+      // Live Photo "still only": upload just the photo.
+      final uploadMotion = entity.isLivePhoto && (filter?.uploadLivePhotoMotion ?? true);
+
       final isAvailableLocally = await _storageRepository.isAssetAvailableLocally(asset.id);
 
       if (!isAvailableLocally && CurrentPlatform.isIOS) {
@@ -295,7 +328,7 @@ class ForegroundUploadService {
 
         try {
           file = await _storageRepository.loadFileFromCloud(asset.id, progressHandler: progressHandler);
-          if (entity.isLivePhoto) {
+          if (uploadMotion) {
             livePhotoFile = await _storageRepository.loadMotionFileFromCloud(
               asset.id,
               progressHandler: progressHandler,
@@ -314,7 +347,7 @@ class ForegroundUploadService {
         }
 
         // For live photos, get the motion video file
-        if (entity.isLivePhoto) {
+        if (uploadMotion) {
           livePhotoFile = await _storageRepository.getMotionFileForAsset(asset);
           if (livePhotoFile == null) {
             _logger.warning("Failed to obtain motion part of the livePhoto - ${asset.name}");
@@ -329,9 +362,21 @@ class ForegroundUploadService {
         return;
       }
 
-      if (maxFileSizeBytes != null && await _exceedsMaxFileSize([file, ?livePhotoFile], maxFileSizeBytes)) {
-        _logger.info("Skipping ${asset.id} - ${asset.name} because it exceeds the max backup file size");
-        return;
+      if (filter != null) {
+        var total = await file.length();
+        if (livePhotoFile != null) {
+          total += await livePhotoFile.length();
+        }
+        switch (filter.checkSize(asset, total)) {
+          case BackupSizeDecision.upload:
+            break;
+          case BackupSizeDecision.skipTooLarge:
+            _logger.info("Skipping ${asset.id} - ${asset.name} because it exceeds the max backup file size");
+            return;
+          case BackupSizeDecision.deferUntilLan:
+            _logger.info("Deferring ${asset.id} - ${asset.name}: large file waits for a LAN/Tailscale connection");
+            return;
+        }
       }
 
       final fileName = await _assetMediaRepository.getOriginalFilename(asset.id) ?? asset.name;
@@ -352,7 +397,7 @@ class ForegroundUploadService {
 
       // Upload live photo video first if available
       String? livePhotoVideoId;
-      if (entity.isLivePhoto && livePhotoFile != null) {
+      if (uploadMotion && livePhotoFile != null) {
         final livePhotoTitle = p.setExtension(originalFileName, p.extension(livePhotoFile.path));
 
         final onProgress = callbacks.onProgress;
@@ -480,15 +525,6 @@ class ForegroundUploadService {
     } catch (e) {
       return UploadResult.error(errorMessage: e.toString());
     }
-  }
-
-  Future<bool> _exceedsMaxFileSize(List<File> files, int maxFileSizeBytes) async {
-    for (final file in files) {
-      if (await file.length() > maxFileSizeBytes) {
-        return true;
-      }
-    }
-    return false;
   }
 
   bool _shouldRequireWiFi(LocalAsset asset) {

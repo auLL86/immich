@@ -79,14 +79,23 @@ class BackupRepository extends DatabaseAccessor<Drift> with $BackupRepositoryMix
     );
   }
 
-  Future<List<LocalAsset>> getCandidates(String userId, {bool onlyHashed = true}) async {
+  /// Backup candidates: assets in selected albums and not in excluded albums, plus every asset in
+  /// an album whose (case-insensitive) name is in [alwaysBackupAlbumNames] - those win over an
+  /// excluded album - that are not on the server yet.
+  Future<List<LocalAsset>> getCandidates(
+    String userId, {
+    bool onlyHashed = true,
+    Iterable<String> alwaysBackupAlbumNames = const [],
+  }) async {
     final selectedAlbumIds = _db.localAlbumEntity.selectOnly(distinct: true)
       ..addColumns([_db.localAlbumEntity.id])
       ..where(_db.localAlbumEntity.backupSelection.equalsValue(BackupSelection.selected));
 
+    final alwaysNames = alwaysBackupAlbumNames.map((n) => n.trim().toLowerCase()).where((n) => n.isNotEmpty).toSet();
+
     final query = _db.localAssetEntity.select()
-      ..where(
-        (lae) =>
+      ..where((lae) {
+        Expression<bool> inSelection =
             existsQuery(
               _db.localAlbumAssetEntity.selectOnly()
                 ..addColumns([_db.localAlbumAssetEntity.assetId])
@@ -95,15 +104,31 @@ class BackupRepository extends DatabaseAccessor<Drift> with $BackupRepositoryMix
                       _db.localAlbumAssetEntity.assetId.equalsExp(lae.id),
                 ),
             ) &
+            lae.id.isNotInQuery(_getExcludedSubquery());
+        if (alwaysNames.isNotEmpty) {
+          final alwaysAlbumIds = _db.localAlbumEntity.selectOnly(distinct: true)
+            ..addColumns([_db.localAlbumEntity.id])
+            ..where(_db.localAlbumEntity.name.lower().isIn(alwaysNames));
+          inSelection =
+              inSelection |
+              existsQuery(
+                _db.localAlbumAssetEntity.selectOnly()
+                  ..addColumns([_db.localAlbumAssetEntity.assetId])
+                  ..where(
+                    _db.localAlbumAssetEntity.albumId.isInQuery(alwaysAlbumIds) &
+                        _db.localAlbumAssetEntity.assetId.equalsExp(lae.id),
+                  ),
+              );
+        }
+        return inSelection &
             notExistsQuery(
               _db.remoteAssetEntity.selectOnly()
                 ..addColumns([_db.remoteAssetEntity.checksum])
                 ..where(
                   _db.remoteAssetEntity.checksum.equalsExp(lae.checksum) & _db.remoteAssetEntity.ownerId.equals(userId),
                 ),
-            ) &
-            lae.id.isNotInQuery(_getExcludedSubquery()),
-      )
+            );
+      })
       ..orderBy([(localAsset) => OrderingTerm.desc(localAsset.createdAt)]);
 
     if (onlyHashed) {
@@ -111,5 +136,41 @@ class BackupRepository extends DatabaseAccessor<Drift> with $BackupRepositoryMix
     }
 
     return query.map((localAsset) => localAsset.toDto()).get();
+  }
+
+  /// Names of the local albums each of [assetIds] belongs to (lower-cased keys are not applied).
+  Future<Map<String, Set<String>>> getAlbumNamesForAssets(Iterable<String> assetIds) async {
+    final result = <String, Set<String>>{};
+    final ids = assetIds.toList(growable: false);
+    const chunk = 500;
+    for (var i = 0; i < ids.length; i += chunk) {
+      final part = ids.sublist(i, i + chunk > ids.length ? ids.length : i + chunk);
+      final query = _db.localAlbumAssetEntity.selectOnly()
+        ..addColumns([_db.localAlbumAssetEntity.assetId, _db.localAlbumEntity.name])
+        ..join([
+          innerJoin(
+            _db.localAlbumEntity,
+            _db.localAlbumAssetEntity.albumId.equalsExp(_db.localAlbumEntity.id),
+            useColumns: false,
+          ),
+        ])
+        ..where(_db.localAlbumAssetEntity.assetId.isIn(part));
+      for (final row in await query.get()) {
+        final id = row.read(_db.localAlbumAssetEntity.assetId);
+        final name = row.read(_db.localAlbumEntity.name);
+        if (id != null && name != null) {
+          (result[id] ??= <String>{}).add(name);
+        }
+      }
+    }
+    return result;
+  }
+
+  /// Names of all local albums (for the always-backup album picker).
+  Future<List<String>> getLocalAlbumNames() async {
+    final query = _db.localAlbumEntity.selectOnly(distinct: true)..addColumns([_db.localAlbumEntity.name]);
+    final names = (await query.get()).map((r) => r.read(_db.localAlbumEntity.name)).nonNulls.toSet().toList()
+      ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    return names;
   }
 }

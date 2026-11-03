@@ -44,6 +44,8 @@ enum SettingsKey<T> {
   backupTriggerDelay<int>(),
   backupSyncAlbums<bool>(),
   backupMaxFileSizeMb<int>(),
+  backupFilterSyncEnabled<bool>(),
+  backupFilterProfile<String?>(),
 
   // Timeline
   timelineTilesPerRow<int>(),
